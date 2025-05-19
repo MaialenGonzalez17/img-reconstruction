@@ -1,0 +1,14 @@
+streamlit
+albumentations
+opencv-python-headless
+numpy
+matplotlib
+scikit-image
+torch
+torchvision
+lpips
+pandas
+tqdm
+matplotlib
+piq
+
