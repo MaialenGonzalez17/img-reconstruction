@@ -11,4 +11,4 @@ pandas
 tqdm
 matplotlib
 piq
-
+plotly
