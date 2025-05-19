@@ -475,7 +475,7 @@ if archivo_subido:
     lpips_fn = lpips.LPIPS(net='alex').to(dispositivo)
     modelo = ConvAutoencoder().to(dispositivo)
     
-    checkpoint = torch.load("autoencoder/Buenos/checkpoint.pt", map_location=dispositivo)
+    checkpoint = torch.load("checkpoint.pt", map_location=dispositivo)
     modelo.load_state_dict(checkpoint['model_state_dict'])
     modelo.eval()
 
