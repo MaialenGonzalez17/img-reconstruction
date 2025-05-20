@@ -1,7 +1,4 @@
 import streamlit as st
-
-
-
 from PIL import Image
 import torch
 import torch.nn as nn
@@ -9,7 +6,7 @@ import lpips
 import plotly.graph_objects as go
 import numpy as np
 from Funciones_app import (calcular_brisque, nima, niqe, cargar_imagen, tensor_a_pil, aplicar_transformacion_especifica,
-                           calcular_metricas,  calculate_1image_metrics,
+                           calcular_metricas, calculate_1image_metrics,
                            explicaciones_degradaciones, todas)
 from Funciones_app import image_enhancement_pipeline
 import cv2
@@ -37,7 +34,7 @@ header {
     top: 0;
     left: 0;
     width: 100%;
-    background-color: #ffffffcc; /* blanco con transparencia */
+    background-color: #B0E0E6; /* blanco con transparencia */
     backdrop-filter: blur(6px);
     box-shadow: 0 2px 5px rgba(0,0,0,0.1);
     padding: 10px 20px;
@@ -50,6 +47,7 @@ header {
     color: #333;
     z-index: 9999;
     transition: top 0.3s ease;
+    
 }
 header h1 {
     margin: 0;
@@ -63,16 +61,19 @@ header h1 span.icon {
     font-size: 1.8rem;
 }
 
+/* Menú hamburguesa */
 .menu-hamburger {
     position: relative;
     cursor: pointer;
     width: 30px;
-    height: 25px;
+    height: 24px;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
+    z-index: 10001;
 }
-.menu-hamburger div {
+
+.menu-hamburger div.bar {
     height: 3px;
     background-color: #333;
     border-radius: 2px;
@@ -82,52 +83,72 @@ header h1 span.icon {
 /* Menú desplegable */
 .dropdown-menu {
     position: absolute;
-    top: 35px;
+    top: 36px;
     right: 0;
-    background: white;
+    background: #fff;
     border: 1px solid #ddd;
-    border-radius: 4px;
-    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    border-radius: 8px;
+    box-shadow: 0 6px 12px rgba(0, 0, 0, 0.1);
     display: none;
-    min-width: 140px;
-    font-size: 0.9rem;
+    flex-direction: column;
+    min-width: 160px;
+    font-size: 0.95rem;
+    overflow: hidden;
     z-index: 10000;
 }
+
 .dropdown-menu a {
-    display: block;
-    padding: 10px 15px;
+    padding: 12px 16px;
     color: #333;
     text-decoration: none;
     transition: background-color 0.2s ease;
-}
-.dropdown-menu a:hover {
-    background-color: #f0f0f0;
+    white-space: nowrap;
 }
 
-/* Mostrar menú al pasar el ratón */
-.menu-hamburger:hover .dropdown-menu {
-    display: block;
+.dropdown-menu a:hover {
+    background-color: #f5f5f5;
+}
+
+/* Mostrar menú al pasar el ratón o si está activo */
+.menu-hamburger:hover .dropdown-menu,
+.menu-hamburger.active .dropdown-menu {
+    display: flex;
 }
 </style>
 
 <header id="page-header">
     <h1>
-      <img src="https://cdn-icons-png.flaticon.com/512/8601/8601448.png" alt="Restaurar Icono" style="height: 1em; vertical-align: middle; margin-right: 0.5em;">
-      Restaurador de Imágenes
+        <img src="https://cdn-icons-png.flaticon.com/512/8601/8601448.png" alt="Restaurar Icono" style="height: 1.2em;">
+        Restaurador de Imágenes
     </h1>
-    <div class="menu-hamburger" aria-label="Menú">
-        <div></div>
-        <div></div>
-        <div></div>
+    <div class="menu-hamburger" id="menuToggle" aria-label="Menú" tabindex="0">
+        <div class="bar"></div>
+        <div class="bar"></div>
+        <div class="bar"></div>
         <div class="dropdown-menu" role="menu" aria-hidden="true">
-            <a href="#compartir" role="menuitem">Compartir</a>
-            <a href="#saber-mas" role="menuitem">Saber más</a>
             <a href="#funcionamiento" role="menuitem">Funcionamiento</a>
+            <a href="#saber-mas" role="menuitem">Resultados</a>
+            <a href="#funcionamiento" role="menuitem">Compartir</a>
         </div>
     </div>
 </header>
-<br>
 
+<script>
+// Manejo de clic para abrir/cerrar menú
+const menu = document.getElementById('menuToggle');
+
+menu.addEventListener('click', function (e) {
+    e.stopPropagation();
+    this.classList.toggle('active');
+});
+
+// Cerrar si se hace clic fuera del menú
+document.addEventListener('click', function (e) {
+    if (!menu.contains(e.target)) {
+        menu.classList.remove('active');
+    }
+});
+</script>
 <script>
 // Detectar scroll para ocultar o mostrar header
 let lastScrollTop = 0;
@@ -146,12 +167,10 @@ window.addEventListener('scroll', function(){
 });
 </script>
 """
-
 st.markdown(cabecera_html, unsafe_allow_html=True)
-
+""""""
 # Ahora sí el selector de método justo debajo
 metodo = st.radio("Elige el método de restauración:", ("IA", "Tradicional"))
-
 
 if metodo == "Tradicional":
 
@@ -164,26 +183,26 @@ if metodo == "Tradicional":
 
     **¿Qué métricas se usan para evaluar la calidad de la restauración?**  
     Se emplean métricas con referencia (comparan la imagen restaurada con la original) y métricas sin referencia (evalúan la imagen restaurada por sí misma).  
-    
+
     - **Con referencia:**  
       - **SSIM (Structural Similarity Index):** mide la similitud estructural entre dos imágenes.  
       - **PSNR (Peak Signal-to-Noise Ratio):** mide la relación entre la señal original y el ruido introducido.  
       - **MSE (Mean Squared Error):** calcula el error promedio entre los píxeles de ambas imágenes.  
       - **LPIPS (Learned Perceptual Image Patch Similarity):** evalúa la similitud perceptual entre imágenes usando redes neuronales.
-    
+
     - **Sin referencia:**  
       - **Entropía:** mide la cantidad de información visual o desorden.  
       - **Nitidez (Sharpness):** evalúa el nivel de detalle en la imagen.  
       - **Contraste:** mide la diferencia de intensidad entre los píxeles.  
       - **Colorido (Colorfulness):** estima la viveza y diversidad de colores presentes.
-    
+
     **Comparabilidad de métricas:**  
     Para facilitar la comparación y visualización, todas las métricas se han transformado y escalado a un rango común del 0 al 100%.
         """)
 
     st.markdown("""
     Este sistema permite **eliminar artefactos** en las imágenes de una sonda transvaginal mediante filtros.
-    
+
     1. Sube una imagen.
     2. Para cada tipo de degradación que puede producirse en una sonda, se mostrará: la imagen original, la imagen degradada y la versión restaurada por el modelo.
     3. Cada degradación incluirá una breve explicación de su causa, junto con una sección dedicada a las métricas de calidad correspondientes a esa imagen.
@@ -262,7 +281,8 @@ if metodo == "Tradicional":
             nima_res = nima(restaurada_np)
 
             with st.expander("**Causas**"):
-                explicacion = explicaciones_degradaciones.get(nombre, "No se encontró una explicación específica para esta degradación.")
+                explicacion = explicaciones_degradaciones.get(nombre,
+                                                              "No se encontró una explicación específica para esta degradación.")
                 st.markdown(explicacion)
 
             # Al mostrar las gráficas, define keys dinámicas:
@@ -366,6 +386,8 @@ if metodo == "Tradicional":
 
 elif metodo == "IA":
     st.markdown(estilos_css_tradicional, unsafe_allow_html=True)
+
+
     # ---------------------------
     # MODELO AUTOENCODER
     # ---------------------------
@@ -652,7 +674,7 @@ st.markdown(
             footer.style.transform = 'translateY(100%)';
         } else {
             // Scroll hacia arriba - mostrar footer
-            footer.style.transform = 'translateY(0)';
+            footer.style.transform = 'translateY(100%)';
         }
         lastScrollTop = st <= 0 ? 0 : st; // Para evitar valores negativos
     });
