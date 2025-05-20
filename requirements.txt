@@ -12,4 +12,4 @@ tqdm
 matplotlib
 piq
 plotly
-Pillow
+
