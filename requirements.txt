@@ -12,3 +12,5 @@ tqdm
 matplotlib
 piq
 plotly
+cv2
+Pillow
