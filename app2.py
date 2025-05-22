@@ -9,7 +9,10 @@ from Funciones_app import (calcular_brisque, nima, niqe, cargar_imagen, tensor_a
                            calcular_metricas, calculate_1image_metrics,
                            explicaciones_degradaciones, todas)
 from Funciones_app import image_enhancement_pipeline
-import cv2
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+import av
+from Funciones_video import (image_enhancement, aplicar_transformacion)
+
 # Estilos CSS (solo para método Tradicional, puedes añadir una condición para que se aplique solo ahí)
 estilos_css_tradicional = """
     <style>
@@ -208,17 +211,57 @@ if metodo == "Tradicional":
     3. Cada degradación incluirá una breve explicación de su causa, junto con una sección dedicada a las métricas de calidad correspondientes a esa imagen.
     """)
 
-    archivo_subido = st.file_uploader("📤 Sube tu imagen aquí:",
-                                      type=["png", "jpg", "jpeg"])
 
-    if archivo_subido:
+    # Opciones de entrada
+    opcion = st.radio("📷 Elige una opción para la imagen o vídeo:",
+                      ("Subir imagen", "Capturar desde cámara (imagen)", "Capturar desde cámara (vídeo)"))
+
+    archivo_subido = None
+    captura_imagen = None
+    captura_video = None
+
+    if opcion == "Subir imagen":
+        archivo_subido = st.file_uploader("📤 Sube tu imagen aquí:", type=["png", "jpg", "jpeg"])
+    elif opcion == "Capturar desde cámara (imagen)":
+        captura_imagen = st.camera_input("📸 Toma una foto")
+    elif opcion == "Capturar desde cámara (vídeo)":
+        st.markdown("### 📹 Captura en tiempo real desde tu cámara")
+
+
+        class VideoProcessor:
+            def transform(self, frame: av.VideoFrame) -> np.ndarray:
+                frame_np = frame.to_ndarray(format="bgr24")
+                frame_rgb = cv2.cvtColor(frame_np, cv2.COLOR_BGR2RGB)
+                pil_frame = Image.fromarray(frame_rgb)
+
+                dispositivo = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                img_tensor = cargar_imagen(pil_frame)
+
+                for nombre, transformacion in todas:
+                    img_degradada_tensor = aplicar_transformacion_especifica(img_tensor, nombre)
+                    img_degradada_np = img_degradada_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+                    img_degradada_np = (img_degradada_np * 255).astype(np.uint8)
+                    restaurada_np = image_enhancement_pipeline(img_degradada_np)
+                    break  # Solo primera transformación
+
+                restaurada_bgr = cv2.cvtColor(restaurada_np, cv2.COLOR_RGB2BGR)
+                return restaurada_bgr
+
+
+        # webrtc_streamer(key="video_data", video_processor_factory=VideoProcessor)
+
+    # === IMAGEN ===
+    imagen_entrada = archivo_subido if opcion == "Subir imagen" else captura_imagen
+
+    if imagen_entrada is not None:
 
         dispositivo = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         lpips_fn = lpips.LPIPS(net='alex').to(dispositivo)
         import cv2
 
         # Convertir archivo subido a tensor
-        img_tensor = cargar_imagen(archivo_subido)
+        imagen = Image.open(imagen_entrada).convert("RGB")
+        img_tensor = cargar_imagen(imagen)  # Asegúrate de que tu función `cargar_imagen` acepte PIL.Image
         original = tensor_a_pil(img_tensor)
 
         for i, (nombre, transformacion) in enumerate(todas):
@@ -384,9 +427,238 @@ if metodo == "Tradicional":
                         )
                         st.plotly_chart(fig_ideal_sinref, key=key_ideal_sin_ref)
 
+    elif opcion == "Capturar desde cámara (vídeo)":
+        import os
+        import cv2
+        import tempfile
+        import time
+        import numpy as np
+        import base64
+        from PIL import Image
+
+        print("Voy a capturar un video")
+        # Pide al usuario la carpeta donde guardar el video capturado
+        carpeta_guardado = st.text_input("Ruta donde guardar el video capturado (debe existir)",
+                                         value="./videos_guardados")
+
+        # Asegurarse que la carpeta existe
+        if carpeta_guardado and not os.path.exists(carpeta_guardado):
+            os.makedirs(carpeta_guardado)
+
+
+        def copiar_video(input_path, output_path, fourcc, fps, width, height):
+            cap = cv2.VideoCapture(input_path)
+            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                out.write(frame)
+            cap.release()
+            out.release()
+
+
+        def procesar_video_con_degradacion_y_restauracion(input_path, transformacion_nombre, carpeta_guardado):
+            cap = cv2.VideoCapture(input_path)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps == 0:
+                fps = 20.0
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')  # codec común
+            suffix = ".avi"
+
+            base_name = os.path.splitext(os.path.basename(input_path))[0]
+
+            # Rutas
+            ruta_original = os.path.join(carpeta_guardado, f"{base_name}_original{suffix}")
+            ruta_degradado = os.path.join(carpeta_guardado, f"{base_name}_degradado_{transformacion_nombre}{suffix}")
+            ruta_restaurado = os.path.join(carpeta_guardado, f"{base_name}_restaurado_{transformacion_nombre}{suffix}")
+
+            # 1) Copiar original a nuevo archivo (video original)
+            copiar_video(input_path, ruta_original, fourcc, fps, width, height)
+
+            # 2) Aplicar degradación al original y guardar como degradado
+            cap_orig = cv2.VideoCapture(ruta_original)
+            out_deg = cv2.VideoWriter(ruta_degradado, fourcc, fps, (width, height))
+
+            while True:
+                ret, frame = cap_orig.read()
+                if not ret:
+                    break
+
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_frame = Image.fromarray(frame_rgb)
+                img_tensor = cargar_imagen(pil_frame)
+
+                img_degradada_tensor = aplicar_transformacion(img_tensor, transformacion_nombre, target_size=(width, height))
+                img_degradada_np = img_degradada_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+                img_degradada_np = np.clip(img_degradada_np * 255, 0, 255).astype(np.uint8)
+                degradado_bgr = cv2.cvtColor(img_degradada_np, cv2.COLOR_RGB2BGR)
+
+                out_deg.write(degradado_bgr)
+
+            cap_orig.release()
+            out_deg.release()
+
+            # 3) Restaurar el video degradado y guardar como restaurado
+            cap_deg = cv2.VideoCapture(ruta_degradado)
+            out_res = cv2.VideoWriter(ruta_restaurado, fourcc, fps, (width, height))
+
+            while True:
+                ret, frame = cap_deg.read()
+                if not ret:
+                    break
+
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                try:
+                    restaurada_np = image_enhancement(frame_rgb)
+                    if restaurada_np is None or restaurada_np.shape != frame_rgb.shape:
+                        restaurada_np = frame_rgb
+                except:
+                    restaurada_np = frame_rgb
+
+                restaurada_bgr = cv2.cvtColor(restaurada_np, cv2.COLOR_RGB2BGR)
+                out_res.write(restaurada_bgr)
+
+            cap_deg.release()
+            out_res.release()
+
+            time.sleep(0.5)
+            return ruta_original, ruta_degradado, ruta_restaurado
+
+        if 'estado_video' not in st.session_state:
+            st.session_state['estado_video'] = {
+                "grabando": False,
+                "finalizado": False,
+                "video_path": None
+            }
+
+        col1, col2, col3 = st.columns(3)
+        start = col1.button("🎥 Start")
+        restart = col2.button("🔁 Restart")
+
+        if start and not st.session_state['estado_video']["grabando"]:
+            st.session_state['estado_video']["grabando"] = True
+            st.session_state['estado_video']["finalizado"] = False
+            st.session_state['estado_video']["video_path"] = None
+            st.success("Grabando video...")
+
+        if restart:
+            st.session_state['estado_video'] = {
+                "grabando": False,
+                "finalizado": False,
+                "video_path": None
+            }
+            st.warning("Video reiniciado.")
+
+        if st.session_state['estado_video']["grabando"]:
+            stframe = st.empty()
+            cap = cv2.VideoCapture(0)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps == 0:
+                fps = 20.0
+            # Codec XVID para avi
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+
+            nombre_video = f"video_capturado_{int(time.time())}.avi"
+            ruta_video_guardado = os.path.join(carpeta_guardado, nombre_video)
+            out = cv2.VideoWriter(ruta_video_guardado, fourcc, fps, (width, height))
+
+            max_frames = 100
+            frames_capturados = 0
+
+            while cap.isOpened() and frames_capturados < max_frames:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                out.write(frame)
+                stframe.image(frame, channels="BGR", caption="Grabando...")
+                frames_capturados += 1
+
+            cap.release()
+            out.release()
+
+            st.session_state['estado_video']["grabando"] = False
+            st.session_state['estado_video']["video_path"] = ruta_video_guardado
+            st.session_state['estado_video']["finalizado"] = True
+            st.success(
+                f"Grabación completada con {frames_capturados} frames.\nVideo guardado en: {ruta_video_guardado}")
+
+
+        def reproducir_avi_con_opencv(video_path, key=None):
+            cap = cv2.VideoCapture(video_path)
+            stframe = st.empty()
+
+            if not cap.isOpened():
+                st.error(f"No se pudo abrir el video: {video_path}")
+                return
+
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps == 0:
+                fps = 20.0
+            frame_delay = 1.0 / fps
+
+            # Eliminar el bucle while True para no repetir el video
+            # Simplemente recorrer una vez todos los frames
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                stframe.image(frame, use_container_width=True)
+                time.sleep(frame_delay)
+
+            cap.release()
+
+
+        def mostrar_video(video_path, key=None):
+            if video_path and os.path.exists(video_path):
+                extension = os.path.splitext(video_path)[1].lower()
+                if extension == ".avi":
+                    reproducir_avi_con_opencv(video_path, key)
+                else:
+                    with open(video_path, "rb") as f:
+                        video_bytes = f.read()
+                        st.video(video_bytes)
+            else:
+                st.error("No se pudo cargar el video.")
+
+
+        # Uso dentro del flujo principal
+        if st.session_state['estado_video']["finalizado"] and st.session_state['estado_video']["video_path"]:
+            video_path = st.session_state['estado_video']["video_path"]
+
+            for nombre, transformacion in todas:
+                st.markdown(f"---\n### 🛠️ Degradación y restauración: {nombre}")
+                vid_orig_guardado, vid_deg_guardado, vid_res_guardado = procesar_video_con_degradacion_y_restauracion(
+                    video_path, nombre, carpeta_guardado)
+
+                cols = st.columns(3)
+                with cols[0]:
+                    st.markdown("**Original**")
+                    mostrar_video(vid_orig_guardado)
+
+                with cols[1]:
+                    st.markdown("**Degradado**")
+                    mostrar_video(vid_deg_guardado)
+
+                with cols[2]:
+                    st.markdown("**Restaurado**")
+                    mostrar_video(vid_res_guardado)
+
+                print(f"Transformacion {transformacion} terminada. Guardada en {vid_deg_guardado} y {vid_res_guardado}")
+
+
+
 elif metodo == "IA":
     st.markdown(estilos_css_tradicional, unsafe_allow_html=True)
-
 
     # ---------------------------
     # MODELO AUTOENCODER
@@ -466,10 +738,55 @@ elif metodo == "IA":
         3. Cada degradación incluirá una breve explicación de su causa, junto con una sección dedicada a las métricas de calidad correspondientes a esa imagen.
         """)
 
-    archivo_subido = st.file_uploader("📤 Sube tu imagen aquí:",
-                                      type=["png", "jpg", "jpeg"])
+    # Opciones de entrada
+    opcion = st.radio("📷 Elige una opción para la imagen o vídeo:",
+                      ("Subir imagen", "Capturar desde cámara (imagen)", "Capturar desde cámara (vídeo)"))
 
-    if archivo_subido:
+    archivo_subido = None
+    captura_imagen = None
+    captura_video = None
+
+    if opcion == "Subir imagen":
+        archivo_subido = st.file_uploader("📤 Sube tu imagen aquí:", type=["png", "jpg", "jpeg"])
+    elif opcion == "Capturar desde cámara (imagen)":
+        captura_imagen = st.camera_input("📸 Toma una foto")
+    elif opcion == "Capturar desde cámara (vídeo)":
+        st.markdown("### 📹 Captura en tiempo real desde tu cámara")
+
+
+        class VideoProcessor(VideoTransformerBase):
+            def __init__(self, modelo, transformaciones):
+                self.modelo = modelo
+                self.transformaciones = transformaciones
+                self.dispositivo = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+            def transform(self, frame: av.VideoFrame) -> np.ndarray:
+                frame_np = frame.to_ndarray(format="bgr24")
+                frame_rgb = cv2.cvtColor(frame_np, cv2.COLOR_BGR2RGB)
+                pil_frame = Image.fromarray(frame_rgb)
+
+                img_tensor = cargar_imagen(pil_frame).to(self.dispositivo)  # (1,3,H,W)
+
+                # Aplicar solo la primera transformación para no ralentizar el video
+                nombre, _ = self.transformaciones[0]
+                img_degradada_tensor = aplicar_transformacion_especifica(img_tensor, nombre)
+
+                with torch.no_grad():
+                    restaurada_tensor = self.modelo(img_degradada_tensor.to(self.dispositivo))
+
+                restaurada_np = restaurada_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+                restaurada_np = np.clip(restaurada_np * 255, 0, 255).astype(np.uint8)
+                restaurada_bgr = cv2.cvtColor(restaurada_np, cv2.COLOR_RGB2BGR)
+
+                return restaurada_bgr
+
+
+        #webrtc_streamer(key="video_data", video_processor_factory=VideoProcessor)
+
+    # === IMAGEN ===
+    imagen_entrada = archivo_subido if opcion == "Subir imagen" else captura_imagen
+
+    if imagen_entrada is not None:
 
         dispositivo = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         lpips_fn = lpips.LPIPS(net='alex').to(dispositivo)
@@ -479,7 +796,8 @@ elif metodo == "IA":
         modelo.load_state_dict(checkpoint['model_state_dict'])
         modelo.eval()
 
-        img_tensor = cargar_imagen(archivo_subido)
+        imagen = Image.open(imagen_entrada).convert("RGB")
+        img_tensor = cargar_imagen(imagen)  # Asegúrate de que tu función `cargar_imagen` acepte PIL.Image
         original = tensor_a_pil(img_tensor)
 
         for i, (nombre, transformacion) in enumerate(todas):
@@ -622,7 +940,7 @@ elif metodo == "IA":
                         st.markdown("**Ideal**")
                         fig_ideal_sinref = go.Figure()
                         fig_ideal_sinref.add_trace(go.Scatterpolar(
-                            r=[100, 70, 50, 50, 100, 0, 100],  # Valores ideales arbitrarios para las nuevas métricas
+                            r=[100, 70, 60, 50, 0, 0, 100],  # Valores ideales arbitrarios para las nuevas métricas
                             theta=categories_sin_ref,
                             fill='toself',
                             name='Ideal',
@@ -636,6 +954,236 @@ elif metodo == "IA":
                             margin=dict(l=10, r=10, t=10, b=10)
                         )
                         st.plotly_chart(fig_ideal_sinref, key=key_ideal_sin_ref)
+            # === VIDEO EN VIVO DESDE CÁMARA ===
+
+    elif opcion == "Capturar desde cámara (vídeo)":
+        import os
+        import cv2
+        import time
+        import numpy as np
+        from PIL import Image
+
+        print("Voy a capturar un video")
+        # Pide al usuario la carpeta donde guardar el video capturado
+        carpeta_guardado = st.text_input("Ruta donde guardar el video capturado (debe existir)",
+                                         value="./videos_guardados")
+
+        # Asegurarse que la carpeta existe
+        if carpeta_guardado and not os.path.exists(carpeta_guardado):
+            os.makedirs(carpeta_guardado)
+
+
+        def copiar_video(input_path, output_path, fourcc, fps, width, height):
+            cap = cv2.VideoCapture(input_path)
+            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                out.write(frame)
+            cap.release()
+            out.release()
+
+
+        def procesar_video_con_degradacion_y_restauracion(input_path, transformacion_nombre, carpeta_guardado):
+            cap = cv2.VideoCapture(input_path)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps == 0:
+                fps = 20.0
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')  # codec común
+            suffix = ".avi"
+
+            base_name = os.path.splitext(os.path.basename(input_path))[0]
+
+            # Rutas
+            ruta_original = os.path.join(carpeta_guardado, f"{base_name}_original{suffix}")
+            ruta_degradado = os.path.join(carpeta_guardado, f"{base_name}_degradado_{transformacion_nombre}{suffix}")
+            ruta_restaurado = os.path.join(carpeta_guardado, f"{base_name}_restaurado_{transformacion_nombre}{suffix}")
+
+            # 1) Copiar original a nuevo archivo (video original)
+            copiar_video(input_path, ruta_original, fourcc, fps, width, height)
+
+            # 2) Aplicar degradación al original y guardar como degradado
+            cap_orig = cv2.VideoCapture(ruta_original)
+            out_deg = cv2.VideoWriter(ruta_degradado, fourcc, fps, (width, height))
+
+            while True:
+                ret, frame = cap_orig.read()
+                if not ret:
+                    break
+
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_frame = Image.fromarray(frame_rgb)
+                img_tensor = cargar_imagen(pil_frame)
+
+                img_degradada_tensor = aplicar_transformacion(img_tensor, transformacion_nombre, target_size=(width, height))
+                img_degradada_np = img_degradada_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+                img_degradada_np = np.clip(img_degradada_np * 255, 0, 255).astype(np.uint8)
+                degradado_bgr = cv2.cvtColor(img_degradada_np, cv2.COLOR_RGB2BGR)
+
+                out_deg.write(degradado_bgr)
+
+            cap_orig.release()
+            out_deg.release()
+
+            # 3) Restaurar el video degradado y guardar como restaurado
+            cap_deg = cv2.VideoCapture(ruta_degradado)
+            out_res = cv2.VideoWriter(ruta_restaurado, fourcc, fps, (width, height))
+
+            while True:
+                ret, frame = cap_deg.read()
+                if not ret:
+                    break
+
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                try:
+                    restaurada_np = modelo(frame_rgb)
+                    if restaurada_np is None or restaurada_np.shape != frame_rgb.shape:
+                        restaurada_np = frame_rgb
+                except:
+                    restaurada_np = frame_rgb
+
+                restaurada_bgr = cv2.cvtColor(restaurada_np, cv2.COLOR_RGB2BGR)
+                out_res.write(restaurada_bgr)
+
+            cap_deg.release()
+            out_res.release()
+
+            time.sleep(0.5)
+            return ruta_original, ruta_degradado, ruta_restaurado
+
+        if 'estado_video' not in st.session_state:
+            st.session_state['estado_video'] = {
+                "grabando": False,
+                "finalizado": False,
+                "video_path": None
+            }
+
+        col1, col2, col3 = st.columns(3)
+        start = col1.button("🎥 Start")
+        restart = col2.button("🔁 Restart")
+
+        if start and not st.session_state['estado_video']["grabando"]:
+            st.session_state['estado_video']["grabando"] = True
+            st.session_state['estado_video']["finalizado"] = False
+            st.session_state['estado_video']["video_path"] = None
+            st.success("Grabando video...")
+
+        if restart:
+            st.session_state['estado_video'] = {
+                "grabando": False,
+                "finalizado": False,
+                "video_path": None
+            }
+            st.warning("Video reiniciado.")
+
+        if st.session_state['estado_video']["grabando"]:
+            stframe = st.empty()
+            cap = cv2.VideoCapture(0)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps == 0:
+                fps = 20.0
+            # Codec XVID para avi
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+
+            nombre_video = f"video_capturado_{int(time.time())}.avi"
+            ruta_video_guardado = os.path.join(carpeta_guardado, nombre_video)
+            out = cv2.VideoWriter(ruta_video_guardado, fourcc, fps, (width, height))
+
+            max_frames = 100
+            frames_capturados = 0
+
+            while cap.isOpened() and frames_capturados < max_frames:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                out.write(frame)
+                stframe.image(frame, channels="BGR", caption="Grabando...")
+                frames_capturados += 1
+
+            cap.release()
+            out.release()
+
+            st.session_state['estado_video']["grabando"] = False
+            st.session_state['estado_video']["video_path"] = ruta_video_guardado
+            st.session_state['estado_video']["finalizado"] = True
+            st.success(
+                f"Grabación completada con {frames_capturados} frames.\nVideo guardado en: {ruta_video_guardado}")
+
+
+        def reproducir_avi_con_opencv(video_path, key=None):
+            cap = cv2.VideoCapture(video_path)
+            stframe = st.empty()
+
+            if not cap.isOpened():
+                st.error(f"No se pudo abrir el video: {video_path}")
+                return
+
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps == 0:
+                fps = 20.0
+            frame_delay = 1.0 / fps
+
+            # Eliminar el bucle while True para no repetir el video
+            # Simplemente recorrer una vez todos los frames
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                stframe.image(frame, use_container_width=True)
+                time.sleep(frame_delay)
+
+            cap.release()
+
+
+        def mostrar_video(video_path, key=None):
+            if video_path and os.path.exists(video_path):
+                extension = os.path.splitext(video_path)[1].lower()
+                if extension == ".avi":
+                    reproducir_avi_con_opencv(video_path, key)
+                else:
+                    with open(video_path, "rb") as f:
+                        video_bytes = f.read()
+                        st.video(video_bytes)
+            else:
+                st.error("No se pudo cargar el video.")
+
+
+        # Uso dentro del flujo principal
+        if st.session_state['estado_video']["finalizado"] and st.session_state['estado_video']["video_path"]:
+            video_path = st.session_state['estado_video']["video_path"]
+
+            for nombre, transformacion in todas:
+                st.markdown(f"---\n### 🛠️ Degradación y restauración: {nombre}")
+                vid_orig_guardado, vid_deg_guardado, vid_res_guardado = procesar_video_con_degradacion_y_restauracion(
+                    video_path, nombre, carpeta_guardado)
+
+                cols = st.columns(3)
+                with cols[0]:
+                    st.markdown("**Original**")
+                    mostrar_video(vid_orig_guardado)
+
+                with cols[1]:
+                    st.markdown("**Degradado**")
+                    mostrar_video(vid_deg_guardado)
+
+                with cols[2]:
+                    st.markdown("**Restaurado**")
+                    mostrar_video(vid_res_guardado)
+
+                print(f"Transformacion {transformacion} terminada. Guardada en {vid_deg_guardado} y {vid_res_guardado}")
+
+
+
 
 st.markdown(
     """
@@ -652,7 +1200,7 @@ st.markdown(
         padding: 5px 0;
         border-top: 1px solid #e7e7e7;
         font-family: Arial, sans-serif;
-        transition: transform 0.3s ease;
+        # transition: transform 0.3s ease;
         z-index: 1000;
     }
     </style>
@@ -671,7 +1219,7 @@ st.markdown(
         let st = window.pageYOffset || document.documentElement.scrollTop;
         if (st > lastScrollTop){
             // Scroll hacia abajo - ocultar footer
-            footer.style.transform = 'translateY(100%)';
+            footer.style.transform = 'translateY(0%)';
         } else {
             // Scroll hacia arriba - mostrar footer
             footer.style.transform = 'translateY(100%)';
